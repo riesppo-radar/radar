@@ -1,0 +1,36 @@
+name: Riesppo Radar — coleta automática
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */2 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Baixar repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+
+      - name: Executar coletor
+        run: python collector.py
+
+      - name: Salvar resultados
+        run: |
+          git config user.name "riesppo-radar"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/opportunities.json
+          git diff --cached --quiet || git commit -m "Atualiza oportunidades"
+          git push
