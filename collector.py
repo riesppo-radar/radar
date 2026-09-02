@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import requests
 
-BASE='https://pncp.gov.br/api/consulta'
+BASE='https://pncp.gov.br/api/pncp''
 DATA=Path('data/opportunities.json')
 DAYS=int(os.getenv('LOOKBACK_DAYS','2'))
 UFS=[x.strip().upper() for x in os.getenv('UFS','MG,BA,ES').split(',') if x.strip()]
