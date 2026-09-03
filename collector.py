@@ -10,28 +10,28 @@ import requests
 BASE = "https://pncp.gov.br/api/consulta"
 DATA = Path("data/opportunities.json")
 
-LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "2"))
+LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "3"))
 UFS = [
     x.strip().upper()
     for x in os.getenv("UFS", "MG,BA,ES").split(",")
     if x.strip()
 ]
 
-# Para o Radar, começamos pelas modalidades que mais
-# provavelmente contêm contratação relevante para serviços jurídicos.
+PAGE_SIZE = 50
+MAX_PAGES = 2
+TIMEOUT = 20
+RETRIES = 3
+
+# Modalidades mais relevantes para a Riesppo.
 MODALITIES = {
     4: "Concorrência",
     6: "Pregão Eletrônico",
     8: "Dispensa",
     9: "Inexigibilidade",
+    12: "Credenciamento",
 }
 
-PAGE_SIZE = 50
-MAX_PAGES = 2
-TIMEOUT = 20
-MAX_RETRIES = 3
-
-KEYWORDS = {
+LEGAL_KEYWORDS = {
     "Advocacia / Jurídico": [
         "escritório de advocacia",
         "serviços advocatícios",
@@ -46,34 +46,33 @@ KEYWORDS = {
         "assessoramento juridico",
         "parecer jurídico",
         "parecer juridico",
+        "consultoria legal",
     ],
     "Tributário": [
-        "tributário",
-        "tributaria",
-        "tributário municipal",
-        "tributaria municipal",
-        "recuperação de créditos tributários",
-        "recuperacao de creditos tributarios",
+        "direito tributário",
+        "direito tributario",
+        "consultoria tributária",
+        "consultoria tributaria",
+        "assessoria tributária",
+        "assessoria tributaria",
         "créditos tributários",
         "creditos tributarios",
+        "recuperação de créditos tributários",
+        "recuperacao de creditos tributarios",
         "execução fiscal",
         "execucao fiscal",
         "arrecadação tributária",
         "arrecadacao tributaria",
-        "recuperação tributária",
-        "recuperacao tributaria",
     ],
     "Administrativo / Contratos": [
-        "licitações e contratos",
-        "licitacoes e contratos",
-        "licitação e contratos",
-        "licitacao e contratos",
-        "contratos administrativos",
         "direito administrativo",
         "assessoria em licitações",
         "assessoria em licitacoes",
         "consultoria em licitações",
         "consultoria em licitacoes",
+        "licitações e contratos",
+        "licitacoes e contratos",
+        "contratos administrativos",
         "contratação pública",
         "contratacao publica",
     ],
@@ -81,10 +80,12 @@ KEYWORDS = {
         "rpps",
         "regime próprio de previdência",
         "regime proprio de previdencia",
-        "previdenciário",
-        "previdenciaria",
-        "previdência municipal",
-        "previdencia municipal",
+        "direito previdenciário",
+        "direito previdenciario",
+        "assessoria previdenciária",
+        "assessoria previdenciaria",
+        "consultoria previdenciária",
+        "consultoria previdenciaria",
     ],
     "Legislativo": [
         "assessoria legislativa",
@@ -102,84 +103,126 @@ KEYWORDS = {
     ],
 }
 
-# Termos que geralmente indicam contratação sem relação
-# com aquilo que queremos.
-NEGATIVE = [
+# Expressões que normalmente indicam uma compra sem interesse
+# para o Radar jurídico.
+NEGATIVE_KEYWORDS = [
+    "material de limpeza",
+    "material de expediente",
+    "medicamento",
+    "medicamentos",
+    "celular",
+    "telefone celular",
+    "computador",
+    "notebook",
+    "mobiliário",
+    "mobiliario",
+    "alimentos",
+    "alimentação",
+    "alimentacao",
     "obra",
+    "obras",
     "construção",
     "construcao",
     "engenharia",
-    "software",
-    "informática",
-    "informatica",
-    "publicidade",
-    "marketing",
-    "limpeza",
-    "vigilância",
-    "vigilancia",
-    "segurança",
-    "seguranca",
-    "manutenção",
-    "manutencao",
-    "alimentação",
-    "alimentacao",
-    "medicamentos",
-    "material hospitalar",
+    "manutenção predial",
+    "manutencao predial",
+    "combustível",
+    "combustivel",
+    "veículo",
+    "veiculo",
+    "uniforme",
 ]
 
 
 def norm(value):
-    return re.sub(r"\s+", " ", str(value or "").lower()).strip()
+    return re.sub(
+        r"\s+",
+        " ",
+        str(value or "").lower(),
+    ).strip()
 
 
-def classify(text):
-    text = norm(text)
+def classify(title, description):
+    text = norm(f"{title} {description}")
 
     areas = []
 
-    for area, terms in KEYWORDS.items():
+    for area, terms in LEGAL_KEYWORDS.items():
         if any(term in text for term in terms):
             areas.append(area)
 
     return areas
 
 
-def calculate_score(title, description, modality, areas):
+def is_relevant(title, description):
     text = norm(f"{title} {description}")
 
-    score = 10
+    areas = classify(title, description)
 
-    # Quanto mais áreas jurídicas detectadas, melhor.
-    score += min(len(areas) * 10, 40)
+    if not areas:
+        return False, []
 
-    # Contratação expressamente jurídica.
-    if "escritório de advocacia" in text:
-        score += 30
+    explicit_legal = any(
+        term in text
+        for term in LEGAL_KEYWORDS["Advocacia / Jurídico"]
+    )
 
-    if "serviços jurídicos" in text or "serviços advocatícios" in text:
-        score += 25
+    # Se houver referência expressa a advocacia/jurídico,
+    # entra mesmo que outras palavras apareçam.
+    if explicit_legal:
+        return True, areas
 
-    # Inexigibilidade/dispensa/credenciamento possuem especial
-    # relevância para nossa finalidade.
+    # Evita falsos positivos de compras comuns.
+    if any(
+        term in text
+        for term in NEGATIVE_KEYWORDS
+    ):
+        return False, areas
+
+    return True, areas
+
+
+def score(title, description, modality, areas):
+    text = norm(f"{title} {description}")
+
+    value = 20
+
+    value += min(
+        len(areas) * 10,
+        40,
+    )
+
+    if any(
+        term in text
+        for term in [
+            "escritório de advocacia",
+            "serviços jurídicos",
+            "serviços advocatícios",
+            "contratação de advogado",
+        ]
+    ):
+        value += 30
+
     if modality in {
         "Inexigibilidade",
         "Dispensa",
+        "Credenciamento",
     }:
-        score += 10
+        value += 10
 
-    return min(score, 100)
+    return min(value, 100)
 
 
-def request_json(url, params=None):
+def request_json(url, params):
     headers = {
         "Accept": "application/json",
         "User-Agent": (
             "Mozilla/5.0 "
-            "(compatible; Riesppo-Radar/1.0; +https://github.com/riesppo-radar/radar)"
+            "(compatible; Riesppo-Radar/1.0)"
         ),
     }
 
-    for attempt in range(1, MAX_RETRIES + 1):
+    for attempt in range(1, RETRIES + 1):
         try:
             response = requests.get(
                 url,
@@ -194,45 +237,106 @@ def request_json(url, params=None):
             )
 
             if response.status_code == 429:
-                wait = 5 * attempt
+                wait = attempt * 5
                 print(
-                    f"Rate limit. Aguardando {wait}s..."
+                    f"Rate limit. "
+                    f"Aguardando {wait}s."
                 )
                 time.sleep(wait)
                 continue
 
             if response.status_code >= 500:
-                wait = 3 * attempt
+                wait = attempt * 3
                 print(
-                    f"Erro do servidor. Aguardando {wait}s..."
+                    f"Erro do PNCP. "
+                    f"Aguardando {wait}s."
                 )
                 time.sleep(wait)
                 continue
 
             response.raise_for_status()
-
             return response.json()
 
         except requests.RequestException as exc:
             print(
-                f"Falha na requisição "
-                f"{attempt}/{MAX_RETRIES}: {exc}"
+                f"Falha HTTP "
+                f"{attempt}/{RETRIES}: {exc}"
             )
 
-            if attempt < MAX_RETRIES:
-                time.sleep(2 * attempt)
+            if attempt < RETRIES:
+                time.sleep(attempt * 2)
 
     return None
 
 
-def fetch_contracts(
+def rows_from_payload(payload):
+    if payload is None:
+        return []
+
+    if isinstance(payload, list):
+        return payload
+
+    if isinstance(payload, dict):
+        return (
+            payload.get("data")
+            or payload.get("content")
+            or payload.get("items")
+            or []
+        )
+
+    return []
+
+
+def fetch_open_proposals(modality_id, modality_name, uf, end_date):
+    endpoint = (
+        f"{BASE}/v1/contratacoes/proposta"
+    )
+
+    for page in range(1, MAX_PAGES + 1):
+        params = {
+            "dataFinal": end_date,
+            "codigoModalidadeContratacao": modality_id,
+            "uf": uf,
+            "pagina": page,
+            "tamanhoPagina": PAGE_SIZE,
+        }
+
+        payload = request_json(
+            endpoint,
+            params,
+        )
+
+        if payload is None:
+            print(
+                f"Sem resposta: "
+                f"{modality_name}/{uf}/página {page}"
+            )
+            break
+
+        rows = rows_from_payload(payload)
+
+        if not rows:
+            break
+
+        for row in rows:
+            yield row, modality_name
+
+        if len(rows) < PAGE_SIZE:
+            break
+
+        time.sleep(0.5)
+
+
+def fetch_recent_publications(
     modality_id,
     modality_name,
     uf,
     start_date,
     end_date,
 ):
-    endpoint = f"{BASE}/v1/contratacoes/publicacao"
+    endpoint = (
+        f"{BASE}/v1/contratacoes/publicacao"
+    )
 
     for page in range(1, MAX_PAGES + 1):
         params = {
@@ -246,41 +350,27 @@ def fetch_contracts(
 
         payload = request_json(
             endpoint,
-            params=params,
+            params,
         )
 
         if payload is None:
-            print(
-                f"Consulta falhou: "
-                f"{modality_name} / {uf} / página {page}"
-            )
-            continue
+            break
 
-        if isinstance(payload, dict):
-            rows = (
-                payload.get("data")
-                or payload.get("content")
-                or []
-            )
-        elif isinstance(payload, list):
-            rows = payload
-        else:
-            rows = []
+        rows = rows_from_payload(payload)
 
         if not rows:
-            return
+            break
 
         for row in rows:
             yield row, modality_name
 
         if len(rows) < PAGE_SIZE:
-            return
+            break
 
-        # Pequena pausa para não martelar a API.
         time.sleep(0.5)
 
 
-def transform(row, modality_name):
+def make_item(row, modality_name):
     title = (
         row.get("objetoCompra")
         or row.get("objeto")
@@ -293,30 +383,29 @@ def transform(row, modality_name):
         or ""
     )
 
-    text = f"{title} {description}"
+    relevant, areas = is_relevant(
+        title,
+        description,
+    )
 
-    areas = classify(text)
-
-    if not areas:
-        return None
-
-    normalized = norm(text)
-
-    # Se só bateu um termo genérico de área e há forte sinal
-    # de que é uma compra completamente alheia ao jurídico,
-    # descartamos.
-    if (
-        not any(
-            term in normalized
-            for term in KEYWORDS["Advocacia / Jurídico"]
-        )
-        and any(term in normalized for term in NEGATIVE)
-        and len(areas) < 2
-    ):
+    if not relevant:
         return None
 
     org = row.get("orgaoEntidade") or {}
     unit = row.get("unidadeOrgao") or {}
+
+    control = (
+        row.get("numeroControlePNCP")
+        or f"{row.get('cnpjOrgao', '')}-"
+        f"{row.get('anoCompra', '')}-"
+        f"{row.get('sequencialCompra', '')}"
+    )
+
+    source = (
+        row.get("linkSistemaOrigem")
+        or row.get("linkProcesso")
+        or "https://pncp.gov.br/"
+    )
 
     publication = (
         row.get("dataPublicacaoPncp")
@@ -329,22 +418,6 @@ def transform(row, modality_name):
         or row.get("dataFimRecebimentoProposta")
         or row.get("dataAberturaProposta")
     )
-
-    source = (
-        row.get("linkSistemaOrigem")
-        or row.get("linkProcesso")
-        or row.get("linkPncp")
-        or "https://pncp.gov.br/"
-    )
-
-    control = row.get("numeroControlePNCP")
-
-    if not control:
-        control = (
-            f"{row.get('cnpjOrgao', '')}-"
-            f"{row.get('anoCompra', '')}-"
-            f"{row.get('sequencialCompra', '')}"
-        )
 
     return {
         "id": f"PNCP:{control}",
@@ -380,7 +453,7 @@ def transform(row, modality_name):
             row.get("valorTotalEstimado")
             or row.get("valorTotal")
         ),
-        "score": calculate_score(
+        "score": score(
             title,
             description,
             modality_name,
@@ -403,11 +476,6 @@ def load_existing():
             )
         )
     except Exception:
-        print(
-            "Arquivo existente inválido. "
-            "Começando do zero."
-        )
-
         return {
             "last_scan": None,
             "opportunities": [],
@@ -424,14 +492,14 @@ def parse_date(value):
         if value.endswith("Z"):
             value = value[:-1] + "+00:00"
 
-        result = datetime.fromisoformat(value)
+        parsed = datetime.fromisoformat(value)
 
-        if result.tzinfo is None:
-            result = result.replace(
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(
                 tzinfo=timezone.utc
             )
 
-        return result
+        return parsed
 
     except (ValueError, TypeError):
         return None
@@ -446,16 +514,6 @@ def main():
 
     end = now.strftime("%Y%m%d")
 
-    print("=" * 70)
-    print("RIESPPO RADAR")
-    print(f"Período: {start} → {end}")
-    print(f"UFs: {', '.join(UFS)}")
-    print(
-        "Modalidades: "
-        + ", ".join(MODALITIES.values())
-    )
-    print("=" * 70)
-
     existing = load_existing()
 
     by_id = {
@@ -467,23 +525,34 @@ def main():
         if item.get("id")
     }
 
-    collected = 0
+    print("=" * 70)
+    print("RIESPPO RADAR")
+    print(f"Publicações: {start} → {end}")
+    print(
+        "Estados: "
+        + ", ".join(UFS)
+    )
+    print("=" * 70)
 
+    # 1. Primeiro: aquilo que ESTÁ ABERTO para propostas.
+    # Isso recebe prioridade máxima.
     for modality_id, modality_name in MODALITIES.items():
         for uf in UFS:
             print(
-                f"\n>>> {modality_name} | {uf}"
+                f"[ABERTAS] "
+                f"{modality_name} / {uf}"
             )
 
-            for raw, modality in fetch_contracts(
-                modality_id,
-                modality_name,
-                uf,
-                start,
-                end,
-            ) or []:
-
-                item = transform(
+            for raw, modality in (
+                fetch_open_proposals(
+                    modality_id,
+                    modality_name,
+                    uf,
+                    end,
+                )
+                or []
+            ):
+                item = make_item(
                     raw,
                     modality,
                 )
@@ -491,11 +560,15 @@ def main():
                 if not item:
                     continue
 
-                previous = by_id.get(item["id"])
+                existing_item = by_id.get(
+                    item["id"]
+                )
 
                 item["first_seen_at"] = (
-                    previous.get("first_seen_at")
-                    if previous
+                    existing_item.get(
+                        "first_seen_at"
+                    )
+                    if existing_item
                     else now.isoformat()
                 )
 
@@ -503,47 +576,81 @@ def main():
                     now.isoformat()
                 )
 
-                by_id[item["id"]] = item
-
-                collected += 1
-
-    rows = []
-
-    for item in by_id.values():
-        deadline = parse_date(
-            item.get("deadline_date")
-        )
-
-        if deadline and deadline < now:
-            item["status"] = "CLOSED"
-        else:
-            first_seen = parse_date(
-                item.get("first_seen_at")
-            )
-
-            if (
-                first_seen
-                and (
-                    now - first_seen
-                ).total_seconds()
-                < 36 * 3600
-            ):
-                item["status"] = "NEW"
-            else:
                 item["status"] = "OPEN"
 
-        rows.append(item)
+                by_id[item["id"]] = item
 
+    # 2. Depois: publicações recentes.
+    # Serve para descobrir novas oportunidades que
+    # ainda precisam ser verificadas.
+    for modality_id, modality_name in MODALITIES.items():
+        for uf in UFS:
+            print(
+                f"[PUBLICADAS] "
+                f"{modality_name} / {uf}"
+            )
+
+            for raw, modality in (
+                fetch_recent_publications(
+                    modality_id,
+                    modality_name,
+                    uf,
+                    start,
+                    end,
+                )
+                or []
+            ):
+                item = make_item(
+                    raw,
+                    modality,
+                )
+
+                if not item:
+                    continue
+
+                existing_item = by_id.get(
+                    item["id"]
+                )
+
+                first_seen = (
+                    existing_item.get(
+                        "first_seen_at"
+                    )
+                    if existing_item
+                    else now.isoformat()
+                )
+
+                item["first_seen_at"] = first_seen
+                item["last_seen_at"] = (
+                    now.isoformat()
+                )
+
+                # Se já identificamos como aberta,
+                # NÃO sobrescreve esse estado.
+                if existing_item and (
+                    existing_item.get("status")
+                    == "OPEN"
+                ):
+                    item["status"] = "OPEN"
+                else:
+                    item["status"] = "VERIFY"
+
+                by_id[item["id"]] = item
+
+    rows = list(by_id.values())
+
+    # Tudo que apareceu como aberto nesta execução
+    # permanece OPEN. O restante publicado recentemente
+    # fica VERIFY, evitando a mentira de chamar tudo de aberto.
     rows.sort(
         key=lambda item: (
             item.get("status")
-            not in ("NEW", "OPEN"),
+            not in ("OPEN", "VERIFY"),
             -(item.get("score") or 0),
             item.get("deadline_date") or "",
         )
     )
 
-    # Limite de segurança.
     rows = rows[:5000]
 
     DATA.parent.mkdir(
@@ -563,28 +670,21 @@ def main():
         encoding="utf-8",
     )
 
-    new_count = sum(
-        item.get("status") == "NEW"
-        for item in rows
-    )
-
     open_count = sum(
         item.get("status") == "OPEN"
         for item in rows
     )
 
-    closed_count = sum(
-        item.get("status") == "CLOSED"
+    verify_count = sum(
+        item.get("status") == "VERIFY"
         for item in rows
     )
 
-    print("\n" + "=" * 70)
+    print("=" * 70)
     print("COLETA CONCLUÍDA")
-    print(f"Registros processados: {collected}")
-    print(f"Total armazenado: {len(rows)}")
-    print(f"NOVAS: {new_count}")
+    print(f"Total: {len(rows)}")
     print(f"ABERTAS: {open_count}")
-    print(f"FECHADAS: {closed_count}")
+    print(f"VERIFICAR: {verify_count}")
     print("=" * 70)
 
 
